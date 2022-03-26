@@ -19,6 +19,11 @@
 #include "tc_util.h"
 #include "bpf_util.h"
 
+extern bool debug_enable;
+#define debug(fd, fmt, ...)                                                    \
+	if (debug_enable)                                                      \
+		fprintf(fd, fmt, __VA_ARGS__);
+
 static const enum bpf_prog_type bpf_type = BPF_PROG_TYPE_SCHED_CLS;
 
 static void explain(void)
@@ -119,6 +124,8 @@ opt_bpf:
 				return -1;
 			}
 
+			debug(stderr, "section: %s\n", cfg.section);
+
 			argc = cfg.argc;
 			argv = cfg.argv;
 
@@ -173,6 +180,8 @@ opt_bpf:
 
 	if (skip_sw)
 		cfg.ifindex = t->tcm_ifindex;
+	debug(stderr, "here %d \n", __LINE__);
+	debug(stderr, "here %d %s \n", __LINE__, cfg.section);
 	if (bpf_load_common(&cfg, &bpf_cb_ops, n) < 0) {
 		fprintf(stderr, "Unable to load program\n");
 		return -1;

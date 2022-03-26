@@ -46,6 +46,15 @@
 #include "bpf_elf.h"
 #include "bpf_scm.h"
 
+#ifdef debug_enable
+extern bool debug_enable;
+#define debug(fd, fmt, ...)                                                    \
+	if (debug_enable)                                                      \
+		fprintf(fd, fmt, ##__VA_ARGS__);
+#else
+#define debug(fd, fmt, ...)
+#endif
+
 struct bpf_prog_meta {
 	const char *type;
 	const char *subdir;
@@ -887,6 +896,7 @@ static int bpf_do_parse(struct bpf_cfg_in *cfg, const bool *opt_tbl)
 		if (argc > 0 && matches(*argv, "section") == 0) {
 			NEXT_ARG();
 			section = *argv;
+			debug(stderr, "section: %s\n", section);
 			NEXT_ARG_FWD();
 		}
 
@@ -951,6 +961,7 @@ int bpf_load_common(struct bpf_cfg_in *cfg, const struct bpf_cfg_ops *ops,
 	char annotation[256];
 	int ret;
 
+	debug(stderr, "here %d \n", __LINE__);
 	ret = bpf_do_load(cfg);
 	if (ret < 0)
 		return ret;
@@ -989,6 +1000,7 @@ int bpf_parse_and_load_common(struct bpf_cfg_in *cfg,
 {
 	int ret;
 
+	debug(stderr, "here %d \n", __LINE__);
 	ret = bpf_parse_common(cfg, ops);
 	if (ret < 0)
 		return ret;
@@ -1163,6 +1175,7 @@ struct bpf_elf_ctx {
 	struct bpf_hash_entry	*ht[256];
 	char			*log;
 	size_t			log_size;
+	size_t          strtabidx;
 };
 
 struct bpf_elf_sec_data {
@@ -1256,6 +1269,8 @@ static int bpf_map_create(enum bpf_map_type type, uint32_t size_key,
 	attr.btf_key_type_id = btf_id_key;
 	attr.btf_value_type_id = btf_id_val;
 
+	debug(stderr, "btf_fd:%u, btf_key_type_id:%u, btf_value_type_id:%u\n",
+	      btf_fd, btf_id_key, btf_id_val);
 	return bpf(BPF_MAP_CREATE, &attr, sizeof(attr));
 }
 
@@ -1694,6 +1709,8 @@ static int bpf_btf_find(struct bpf_elf_ctx *ctx, const char *name)
 	const char *res;
 	int id;
 
+	debug(stderr, "here %d ctx->btf.types_num %d\n", __LINE__,
+	      ctx->btf.types_num);
 	for (id = 1; id < ctx->btf.types_num; id++) {
 		type = ctx->btf.types[id];
 		if (type->name_off >= ctx->btf.hdr->str_len)
@@ -1717,6 +1734,7 @@ static int bpf_btf_find_kv(struct bpf_elf_ctx *ctx, const struct bpf_elf_map *ma
 
 	snprintf(btf_name, sizeof(btf_name), "____btf_map_%s", name);
 	id = bpf_btf_find(ctx, btf_name);
+	debug(stderr, "here %d btf_name %s %d\n", __LINE__, btf_name, id);
 	if (id < 0)
 		return id;
 
@@ -1744,6 +1762,8 @@ static int bpf_btf_find_kv(struct bpf_elf_ctx *ctx, const struct bpf_elf_map *ma
 	if (strcmp(res, "value"))
 		return -EINVAL;
 
+	debug(stderr, "here %d %s key->type:%u, val->type:%u\n", __LINE__,
+		btf_name, key->type, val->type);
 	*id_key = key->type;
 	*id_val = val->type;
 	return 0;
@@ -1779,6 +1799,7 @@ static const char *bpf_map_fetch_name(struct bpf_elf_ctx *ctx, int which)
 			continue;
 
 		name = bpf_str_tab_name(ctx, &sym);
+		debug(stderr, "here %d after fectch name %s\n", __LINE__, name);
 		bpf_btf_annotate(ctx, which, name);
 		return name;
 	}
@@ -1802,6 +1823,7 @@ static int bpf_maps_attach_all(struct bpf_elf_ctx *ctx)
 		if (!map_name)
 			return -EIO;
 
+		debug(stderr, "attch %s\n", map_name);
 		fd = bpf_map_attach(map_name, ctx, &ctx->maps[i],
 				    &ctx->maps_ext[i], &have_map_in_map);
 		if (fd < 0)
@@ -1904,6 +1926,7 @@ static int bpf_fill_section_data(struct bpf_elf_ctx *ctx, int section,
 	memcpy(&data->sec_hdr, &sec_hdr, sizeof(sec_hdr));
 
 	data->sec_name = sec_name;
+	debug(stderr, "here %d %s\n", __LINE__, sec_name);
 	data->sec_data = sec_edata;
 	return 0;
 }
@@ -2029,6 +2052,7 @@ static int bpf_fetch_symtab(struct bpf_elf_ctx *ctx, int section,
 {
 	ctx->sym_tab = data->sec_data;
 	ctx->sym_num = data->sec_hdr.sh_size / data->sec_hdr.sh_entsize;
+	ctx->strtabidx = data->sec_hdr.sh_link;
 	ctx->sec_done[section] = true;
 	return 0;
 }
@@ -2162,6 +2186,8 @@ static int bpf_btf_register_type(struct bpf_elf_ctx *ctx,
 
 	ctx->btf.types = types;
 	ctx->btf.types[cur] = type;
+	debug(stderr, "register type: %u, cur: %u\n", BTF_INFO_KIND(type->info),
+	      cur);
 	ctx->btf.types_num = num;
 	return 0;
 }
@@ -2204,6 +2230,12 @@ static int bpf_btf_prep_type_data(struct bpf_elf_ctx *ctx)
 		case BTF_KIND_FUNC_PROTO:
 			type_cur += var_len * sizeof(struct btf_param);
 			break;
+		case BTF_KIND_VAR:
+			type_cur += sizeof(struct btf_var);
+			break;
+		case BTF_KIND_DATASEC:
+			type_cur += var_len * sizeof(struct btf_var_secinfo);
+			break;
 		case BTF_KIND_TYPEDEF:
 		case BTF_KIND_PTR:
 		case BTF_KIND_FWD:
@@ -2234,17 +2266,467 @@ static int bpf_btf_prep_data(struct bpf_elf_ctx *ctx)
 	return ret;
 }
 
+static __u32 btf__get_nr_types(const struct bpf_btf *btf)
+{
+	return btf->types_num - 1;
+}
+
+static const struct btf_type *btf__type_by_id(const struct bpf_btf *btf,
+					      __u32 type_id)
+{
+	if (type_id > btf->types_num)
+		return NULL;
+
+	return btf->types[type_id];
+}
+
+#define BTF_INFO_ENC(kind, kind_flag, vlen)                                    \
+	((!!(kind_flag) << 31) | ((kind) << 24) | ((vlen)&BTF_MAX_VLEN))
+#define BTF_TYPE_ENC(name, info, size_or_type) (name), (info), (size_or_type)
+#define BTF_INT_ENC(encoding, bits_offset, nr_bits)                            \
+	((encoding) << 24 | (bits_offset) << 16 | (nr_bits))
+#define BTF_TYPE_INT_ENC(name, encoding, bits_offset, bits, sz)                \
+	BTF_TYPE_ENC(name, BTF_INFO_ENC(BTF_KIND_INT, 0, 0), sz),              \
+		BTF_INT_ENC(encoding, bits_offset, bits)
+#define BTF_MEMBER_ENC(name, type, bits_offset) (name), (type), (bits_offset)
+#define BTF_PARAM_ENC(name, type) (name), (type)
+#define BTF_VAR_SECINFO_ENC(type, offset, size) (type), (offset), (size)
+
+static inline __u16 btf_kind(const struct btf_type *t)
+{
+	return BTF_INFO_KIND(t->info);
+}
+
+static inline bool btf_is_int(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_INT;
+}
+
+static inline bool btf_is_ptr(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_PTR;
+}
+
+static inline bool btf_is_array(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_ARRAY;
+}
+
+static inline bool btf_is_struct(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_STRUCT;
+}
+
+static inline bool btf_is_union(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_UNION;
+}
+
+static inline bool btf_is_composite(const struct btf_type *t)
+{
+	__u16 kind = btf_kind(t);
+
+	return kind == BTF_KIND_STRUCT || kind == BTF_KIND_UNION;
+}
+
+static inline bool btf_is_enum(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_ENUM;
+}
+
+static inline bool btf_is_fwd(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_FWD;
+}
+
+static inline bool btf_is_typedef(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_TYPEDEF;
+}
+
+static inline bool btf_is_volatile(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_VOLATILE;
+}
+
+static inline bool btf_is_const(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_CONST;
+}
+
+static inline bool btf_is_restrict(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_RESTRICT;
+}
+
+static inline bool btf_is_mod(const struct btf_type *t)
+{
+	__u16 kind = btf_kind(t);
+
+	return kind == BTF_KIND_VOLATILE || kind == BTF_KIND_CONST ||
+	       kind == BTF_KIND_RESTRICT;
+}
+
+static inline bool btf_is_func(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_FUNC;
+}
+
+static inline bool btf_is_func_proto(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_FUNC_PROTO;
+}
+
+static inline bool btf_is_var(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_VAR;
+}
+
+static inline bool btf_is_datasec(const struct btf_type *t)
+{
+	return btf_kind(t) == BTF_KIND_DATASEC;
+}
+
+static inline struct btf_member *btf_members(const struct btf_type *t)
+{
+	return (struct btf_member *)(t + 1);
+}
+
+static const char *btf__name_by_offset(const struct bpf_btf *btf, __u32 offset)
+{
+	if (offset < btf->hdr->str_len)
+		return &btf->strings[offset];
+	else
+		return NULL;
+}
+
+static inline __u16 btf_vlen(const struct btf_type *t)
+{
+	return BTF_INFO_VLEN(t->info);
+}
+
+static inline struct btf_var *btf_var(const struct btf_type *t)
+{
+	return (struct btf_var *)(t + 1);
+}
+
+static inline struct btf_var_secinfo *btf_var_secinfos(const struct btf_type *t)
+{
+	return (struct btf_var_secinfo *)(t + 1);
+}
+
+static void bpf_object__sanitize_btf(struct bpf_elf_ctx *obj)
+{
+	bool has_func_global = false;
+	bool has_datasec = true;
+	bool has_func = true;
+	struct bpf_btf *btf = &obj->btf;
+	struct btf_type *t;
+	int i, j, vlen;
+
+	if (has_func && has_datasec && has_func_global)
+		return;
+
+	debug(stderr, "here %d btf type_num %d\n", __LINE__, btf->types_num);
+
+	for (i = 1; i <= btf__get_nr_types(btf); i++) {
+		t = (struct btf_type *)btf__type_by_id(btf, i);
+
+		if (!has_datasec && btf_is_var(t)) {
+			debug(stderr, "here %d get var to int \n", __LINE__);
+			/* replace VAR with INT */
+			t->info = BTF_INFO_ENC(BTF_KIND_INT, 0, 0);
+			/*
+			 * using size = 1 is the safest choice, 4 will be too
+			 * big and cause kernel BTF validation failure if
+			 * original variable took less than 4 bytes
+			 */
+			t->size = 1;
+			*(int *)(t + 1) = BTF_INT_ENC(0, 0, 8);
+		} else if (!has_datasec && btf_is_datasec(t)) {
+			debug(stderr, "here %d datasec to struct\n",
+				__LINE__);
+			/* replace DATASEC with STRUCT */
+			const struct btf_var_secinfo *v = btf_var_secinfos(t);
+			struct btf_member *m = btf_members(t);
+			struct btf_type *vt;
+			char *name;
+
+			name = (char *)btf__name_by_offset(btf, t->name_off);
+			debug(stderr, "here %d datasec name %s\n", __LINE__,
+				name);
+			while (*name) {
+				if (*name == '.')
+					*name = '_';
+				name++;
+			}
+
+			vlen = btf_vlen(t);
+			t->info = BTF_INFO_ENC(BTF_KIND_STRUCT, 0, vlen);
+			for (j = 0; j < vlen; j++, v++, m++) {
+				/* order of field assignments is important */
+				m->offset = v->offset * 8;
+				m->type = v->type;
+				/* preserve variable name as member name */
+				vt = (void *)btf__type_by_id(btf, v->type);
+				m->name_off = vt->name_off;
+			}
+		} else if (!has_func && btf_is_func_proto(t)) {
+			debug(stderr, "here %d func_proto to enum\n",
+				__LINE__);
+			/* replace FUNC_PROTO with ENUM */
+			vlen = btf_vlen(t);
+			t->info = BTF_INFO_ENC(BTF_KIND_ENUM, 0, vlen);
+			t->size = sizeof(__u32); /* kernel enforced */
+		} else if (!has_func && btf_is_func(t)) {
+			debug(stderr, "here %d func to typedef\n", __LINE__);
+			/* replace FUNC with TYPEDEF */
+			t->info = BTF_INFO_ENC(BTF_KIND_TYPEDEF, 0, 0);
+		} else if (!has_func_global && btf_is_func(t)) {
+			debug(stderr, "here %d func change vlen\n", __LINE__);
+			/* replace BTF_FUNC_GLOBAL with BTF_FUNC_STATIC */
+			t->info = BTF_INFO_ENC(BTF_KIND_FUNC, 0, 0);
+		}
+	}
+}
+
+static int bpf_object_search_section_size(const struct bpf_elf_ctx *obj,
+					  const char *name, size_t *d_size)
+{
+	const GElf_Ehdr *ep = &obj->elf_hdr;
+	Elf *elf = obj->elf_fd;
+	Elf_Scn *scn = NULL;
+	int idx = 0;
+
+	while ((scn = elf_nextscn(elf, scn)) != NULL) {
+		const char *sec_name;
+		Elf_Data *data;
+		GElf_Shdr sh;
+
+		idx++;
+		if (gelf_getshdr(scn, &sh) != &sh) {
+			debug(stderr,
+				"failed to get section(%d) header from %d\n",
+				idx, obj->obj_fd);
+			return -EIO;
+		}
+
+		sec_name = elf_strptr(elf, ep->e_shstrndx, sh.sh_name);
+		if (!sec_name) {
+			debug(stderr,
+				"failed to get section(%d) name from %d\n", idx,
+				obj->obj_fd);
+			return -EIO;
+		}
+
+		if (strcmp(name, sec_name))
+			continue;
+
+		data = elf_getdata(scn, 0);
+		if (!data) {
+			debug(stderr,
+				"failed to get section(%d) data from %s(%d)\n",
+				idx, name, obj->obj_fd);
+			return -EIO;
+		}
+
+		*d_size = data->d_size;
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+static int bpf_object__section_size(const struct bpf_elf_ctx *obj,
+				    const char *name, __u32 *size)
+{
+	int ret = -ENOENT;
+	size_t d_size;
+
+	*size = 0;
+	if (!name) {
+		return -EINVAL;
+	}
+	debug(stderr, "here %d section size name:%s\n", __LINE__, name);
+	//if (!strcmp(name, DATA_SEC)) {
+	//if (obj->efile.data)
+	//*size = obj->efile.data->d_size;
+	//} else if (!strcmp(name, BSS_SEC)) {
+	//if (obj->efile.bss)
+	//*size = obj->efile.bss->d_size;
+	//} else if (!strcmp(name, RODATA_SEC)) {
+	//if (obj->efile.rodata)
+	//*size = obj->efile.rodata->d_size;
+	//} else if (!strcmp(name, STRUCT_OPS_SEC)) {
+	//if (obj->efile.st_ops_data)
+	//*size = obj->efile.st_ops_data->d_size;
+	//} else {
+	ret = bpf_object_search_section_size(obj, name, &d_size);
+	if (!ret)
+		*size = d_size;
+	//}
+
+	return *size ? 0 : ret;
+}
+
+static int bpf_object__variable_offset(const struct bpf_elf_ctx *obj,
+				       const char *name, __u32 *off)
+{
+	Elf_Data *symbols = obj->sym_tab;
+	const char *sname;
+	size_t si;
+
+	if (!name || !off)
+		return -EINVAL;
+
+	for (si = 0; si < symbols->d_size / sizeof(GElf_Sym); si++) {
+		GElf_Sym sym;
+
+		if (!gelf_getsym(symbols, si, &sym))
+			continue;
+		if (GELF_ST_BIND(sym.st_info) != STB_GLOBAL ||
+		    GELF_ST_TYPE(sym.st_info) != STT_OBJECT)
+			continue;
+
+		sname = elf_strptr(obj->elf_fd, obj->strtabidx, sym.st_name);
+		if (!sname) {
+			debug(stderr,
+				"failed to get sym name string for var %s\n",
+				name);
+			return -EIO;
+		}
+		if (strcmp(name, sname) == 0) {
+			*off = sym.st_value;
+			return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+
+static int compare_vsi_off(const void *_a, const void *_b)
+{
+	const struct btf_var_secinfo *a = _a;
+	const struct btf_var_secinfo *b = _b;
+
+	return a->offset - b->offset;
+}
+
+static int btf_fixup_datasec(struct bpf_elf_ctx *obj, struct bpf_btf *btf,
+			     struct btf_type *t)
+{
+	__u32 size = 0, off = 0, i, vars = btf_vlen(t);
+	const char *name = btf__name_by_offset(btf, t->name_off);
+	const struct btf_type *t_var;
+	struct btf_var_secinfo *vsi;
+	const struct btf_var *var;
+	int ret;
+
+	if (!name) {
+		debug(stderr,
+			"No name found in string section for DATASEC kind.\n");
+		return -ENOENT;
+	}
+
+	/* .extern datasec size and var offsets were set correctly during
+	 * extern collection step, so just skip straight to sorting variables
+	 */
+	if (t->size)
+		goto sort_vars;
+
+	ret = bpf_object__section_size(obj, name, &size);
+	if (ret || !size || (t->size && t->size != size)) {
+		debug(stderr, "Invalid size for section %s: %u bytes\n", name,
+			size);
+		return -ENOENT;
+	}
+
+	t->size = size;
+
+	for (i = 0, vsi = btf_var_secinfos(t); i < vars; i++, vsi++) {
+		debug(stderr, "%s var secinfo %u %u %u\n", name, vsi->type,
+			vsi->offset, vsi->size);
+		t_var = btf__type_by_id(btf, vsi->type);
+		var = btf_var(t_var);
+
+		if (!btf_is_var(t_var)) {
+			debug(stderr, "Non-VAR type seen in section %s\n",
+				name);
+			return -EINVAL;
+		}
+
+		if (var->linkage == BTF_VAR_STATIC)
+			continue;
+
+		name = btf__name_by_offset(btf, t_var->name_off);
+		if (!name) {
+			debug(stderr,
+				"No name found in string section for VAR kind\n");
+			return -ENOENT;
+		}
+
+		ret = bpf_object__variable_offset(obj, name, &off);
+		if (ret) {
+			debug(stderr,
+				"No offset found in symbol table for VAR %s\n",
+				name);
+			return -ENOENT;
+		}
+
+		vsi->offset = off;
+	}
+
+sort_vars:
+	qsort(btf_var_secinfos(t), vars, sizeof(*vsi), compare_vsi_off);
+	return 0;
+}
+
+static int btf__finalize_data(struct bpf_elf_ctx *obj, struct bpf_btf *btf)
+{
+	int err = 0;
+	__u32 i;
+
+	for (i = 1; i < btf__get_nr_types(btf); i++) {
+		struct btf_type *t = (struct btf_type *)btf->types[i];
+
+		/* Loader needs to fix up some of the things compiler
+		 * couldn't get its hands on while emitting BTF. This
+		 * is section size and global variable offset. We use
+		 * the info from the ELF itself for this purpose.
+		 */
+		if (btf_is_datasec(t)) {
+			err = btf_fixup_datasec(obj, btf, t);
+			if (err)
+				break;
+		}
+	}
+
+	return err;
+}
+
 static void bpf_fetch_btf_end(struct bpf_elf_ctx *ctx)
 {
-	int fd = bpf_btf_attach(ctx);
-
-	if (fd < 0)
-		return;
-	ctx->btf_fd = fd;
 	if (bpf_btf_prep_data(ctx) < 0) {
-		close(ctx->btf_fd);
-		ctx->btf_fd = 0;
+		debug(stderr, "here %d prep data failed\n", __LINE__);
+		return;
 	}
+
+	debug(stderr, "here %d start finalize data \n", __LINE__);
+	if (btf__finalize_data(ctx, &ctx->btf) < 0) {
+		debug(stderr, "here %d finalize data failed\n", __LINE__);
+		return;
+	}
+
+	debug(stderr, "here %d start sanitize btf\n", __LINE__);
+	bpf_object__sanitize_btf(ctx);
+
+	int fd = bpf_btf_attach(ctx);
+	debug(stderr, "here %d attach btf res:%d\n", __LINE__, fd);
+	if (fd < 0) {
+		debug(stderr, "here %d attach btf failed:%d\n", __LINE__, fd);
+		return;
+	}
+	ctx->btf_fd = fd;
 }
 
 static bool bpf_has_map_data(const struct bpf_elf_ctx *ctx)
@@ -2308,6 +2790,7 @@ static int bpf_fetch_ancillary(struct bpf_elf_ctx *ctx, bool check_text_sec)
 			return ret;
 		}
 
+        debug(stderr, "here %d before map attach all\n", __LINE__);
 		ret = bpf_maps_attach_all(ctx);
 		if (ret < 0) {
 			fprintf(stderr, "Error loading maps into kernel!\n");
@@ -2468,16 +2951,26 @@ static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section,
 	struct bpf_elf_sec_data data_relo, data_insn;
 	int ret, idx, i, fd = -1;
 
+	debug(stderr, "here %d %d %s\n", __LINE__, ctx->elf_hdr.e_shnum,
+	      section);
 	for (i = 1; i < ctx->elf_hdr.e_shnum; i++) {
+		debug(stderr, "here %d %d %d\n", __LINE__, ret, i);
 		struct bpf_relo_props props = {};
 
 		ret = bpf_fill_section_data(ctx, i, &data_relo);
+		debug(stderr, "here %d %d %d %d\n", __LINE__, ret,
+		      data_relo.sec_hdr.sh_type, SHT_REL);
 		if (ret < 0 || data_relo.sec_hdr.sh_type != SHT_REL)
 			continue;
 
 		idx = data_relo.sec_hdr.sh_info;
 
 		ret = bpf_fill_section_data(ctx, idx, &data_insn);
+		debug(stderr, "here %d %d %d %d %ld %d %s %s %d\n", __LINE__,
+		      ret, data_insn.sec_hdr.sh_type, SHT_PROGBITS,
+		      data_insn.sec_hdr.sh_flags, SHF_EXECINSTR,
+		      data_insn.sec_name, section,
+		      strcmp(data_insn.sec_name, section));
 		if (ret < 0 ||
 		    !(data_insn.sec_hdr.sh_type == SHT_PROGBITS &&
 		      (data_insn.sec_hdr.sh_flags & SHF_EXECINSTR) &&
@@ -2492,8 +2985,10 @@ static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section,
 		prog->size = data_insn.sec_data->d_size;
 		prog->insns_num = prog->size / sizeof(struct bpf_insn);
 		prog->insns = malloc(prog->size);
+		debug(stderr, "here %d %d\n", __LINE__, ret);
 		if (!prog->insns) {
 			*lderr = true;
+			debug(stderr, "here %d %d\n", __LINE__, ret);
 			return -ENOMEM;
 		}
 
@@ -2501,16 +2996,19 @@ static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section,
 
 		ret = bpf_apply_relo_data(ctx, &data_relo, prog, &props);
 		if (ret < 0) {
+			debug(stderr, "here %d %d\n", __LINE__, ret);
 			*lderr = true;
 			if (ctx->sec_text != idx)
 				free(prog->insns);
 			return ret;
 		}
 		if (ctx->sec_text == idx) {
+			debug(stderr, "here %d %d\n", __LINE__, ret);
 			fd = 0;
 			goto out;
 		}
 
+		debug(stderr, "here %d %d\n", __LINE__, ret);
 		fd = bpf_prog_attach(section, prog, ctx);
 		free(prog->insns);
 		if (fd < 0) {
@@ -2525,6 +3023,7 @@ static int bpf_fetch_prog_relo(struct bpf_elf_ctx *ctx, const char *section,
 					fprintf(stderr, "JIT disabled, but %u/%u tail call maps in the program have JITed owner!\n",
 						props.tc.jited, props.tc.total);
 			}
+			debug(stderr, "here %d %d\n", __LINE__, fd);
 			return fd;
 		}
 out:
@@ -2543,8 +3042,10 @@ static int bpf_fetch_prog_sec(struct bpf_elf_ctx *ctx, const char *section)
 	int ret = -1;
 
 	if (bpf_has_call_data(ctx)) {
+		debug(stderr, "here %d\n", __LINE__);
 		ret = bpf_fetch_prog_relo(ctx, ".text", &lderr, NULL,
 					  &ctx->prog_text);
+		debug(stderr, "here %d %d %s\n", __LINE__, ret, section);
 		if (ret < 0)
 			return ret;
 	}
@@ -2973,12 +3474,14 @@ static int bpf_obj_open(const char *pathname, enum bpf_prog_type type,
 		return ret;
 	}
 
+    debug(stderr, "here %d btf types_num %d\n", __LINE__, ctx->btf.types_num);
 	ret = bpf_fetch_ancillary(ctx, strcmp(section, ".text"));
 	if (ret < 0) {
 		fprintf(stderr, "Error fetching ELF ancillary data!\n");
 		goto out;
 	}
 
+	debug(stderr, "here %d %s \n", __LINE__, section);
 	fd = bpf_fetch_prog_sec(ctx, section);
 	if (fd < 0) {
 		fprintf(stderr, "Error fetching program/map!\n");

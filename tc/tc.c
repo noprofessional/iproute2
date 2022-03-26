@@ -46,6 +46,7 @@ int json;
 int color;
 int oneline;
 int brief;
+bool debug_enable;
 
 static char *conf_file;
 
